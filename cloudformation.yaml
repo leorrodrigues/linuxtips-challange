@@ -1,0 +1,448 @@
+Resources:
+  OperationsGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: Operations
+  
+  PowerUserRole:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: PowerUsers
+      Groups:
+        - !Ref OperationsGroup
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            NotAction:
+              - "iam:*"
+              - "organizations:*"
+              - "account:*"
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - "iam:CreateServiceLinkedRole"
+              - "iam:DeleteServiceLinkedRole"
+              - "iam:ListRoles"
+              - "organizations:DescribeOrganization"
+              - "account:ListRegions"
+            Resource: "*"
+
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+  
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AWSCloudTrailAclCheck"
+            Effect: "Allow"
+            Principal: 
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:GetBucketAcl"
+            Resource: 
+              !Sub arn:aws:s3:::${CloudTrailBucket}
+          - Sid: "AWSCloudTrailWrite"
+            Effect: "Allow"
+            Principal: 
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource:
+              !Sub arn:aws:s3:::${CloudTrailBucket}/AWSLogs/${AWS::AccountId}/*
+            Condition: 
+              StringEquals:
+                s3:x-amz-acl: "bucket-owner-full-control"
+
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      S3BucketName: !Ref CloudTrailBucket
+    DependsOn: 
+      - CloudTrailBucket
+      - CloudTrailBucketPolicy
+  
+  BucketAWSConfig:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties: {}
+  
+  EC2IamRoleAWSConfig:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "config.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/service-role/AWSConfigRole']
+
+  BucketPolicyAWSConfig:
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref BucketAWSConfig
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - Sid: "AWSConfigBucketPermissionsCheck"
+            Effect: "Allow"
+            Principal: 
+              Service: "config.amazonaws.com"
+            Action: "s3:GetBucketAcl"
+            Resource: 
+              !Sub |-
+                arn:aws:s3:::${BucketAWSConfig}
+          - Sid: "AWSConfigBucketExistenceCheck"
+            Effect: "Allow"
+            Principal: 
+              Service: "config.amazonaws.com"
+            Action: "s3:ListBucket"
+            Resource:
+              !Sub |-
+                arn:aws:s3:::${BucketAWSConfig}
+          - Sid: "AWSConfigBucketDelivery"
+            Effect: "Allow"
+            Principal: 
+              Service: "config.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource: 
+              !Sub |-
+                arn:aws:s3:::${BucketAWSConfig}/AWSLogs/${AWS::AccountId}/Config/*
+            Condition: 
+              StringEquals:
+                s3:x-amz-acl: "bucket-owner-full-control"
+
+  RequiredRulesAWSConfig:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      InputParameters: 
+        tag1Key: Name
+      Source:
+        Owner: AWS
+        SourceIdentifier: "REQUIRED_TAGS"
+  
+  RuleRootAccountMFAEnabledAWSConfig:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      Source:
+        Owner: AWS
+        SourceIdentifier: "ROOT_ACCOUNT_MFA_ENABLED"
+  
+  RuleIamPasswordPolicyAWSConfig:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      Source:
+        Owner: AWS
+        SourceIdentifier: "IAM_PASSWORD_POLICY"
+  
+  RuleApprovedAmisByIdAWSConfig:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      InputParameters: 
+        amiIds: ami-09e67e426f25ce0d7, ami-0747bdcabd34c712a, ami-087c17d1fe0178315
+      Source:
+        Owner: AWS
+        SourceIdentifier: "APPROVED_AMIS_BY_ID"
+  
+#Cria VPC
+  NovoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.100.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-VPC
+
+# Cria O Internet Gateway
+  NovoInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Internet-GW
+    DependsOn: NovoVPC
+  
+
+# Conecta O IG COM O VPC
+  NovoAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref NovoVPC
+      InternetGatewayId: !Ref NovoInternetGateway
+
+# Cria a Subnet Publica
+  NovaSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.100.1.0/24
+      VpcId: !Ref NovoVPC
+      AvailabilityZone: !Select [0, !GetAZs '' ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Publica
+    DependsOn: NovoVPC
+
+# Cria a Subnet Privada        
+  NovaSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.100.10.0/24
+      VpcId: !Ref NovoVPC
+      AvailabilityZone: !Select [0, !GetAZs '' ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Privada
+    DependsOn: NovoVPC
+
+# Cria o Elastic IP Para o Nat Gateway
+  NATGatewayElasticIp: 
+    Type: AWS::EC2::EIP
+    Properties: 
+      Domain: NovoVPC
+
+# Cria o Nat Gatewaay
+  NovoNATGateway: 
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt NATGatewayElasticIp.AllocationId
+      SubnetId: !Ref NovaSubnet1
+      Tags: 
+        - Key: Name
+          Value: !Join ['', ["NAT-", !Ref "AWS::StackName" ]]
+    DependsOn: NATGatewayElasticIp
+
+# Cria a Route Table Privada
+  PrivadaRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref NovoVPC
+      Tags:
+      - Key: Name
+        Value: RouteTable-Privada
+
+# Cria A Route Privada Conectando na Route Table Privada e no NAT GW
+  PrivadaRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivadaRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NovoNATGateway
+
+# Cria a Route Table Publica
+  PublicaRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref NovoVPC
+      Tags:
+      - Key: Name
+        Value: RouteTable-Publica
+
+# Cria A Route Publica Conectando na Route Table Publica e no NAT GW
+  PublicaRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicaRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref NovoInternetGateway
+
+# Associa a Tabela de Rotas com a SubNet Publica
+  PublicaRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicaRouteTable
+      SubnetId: !Ref NovaSubnet1
+
+# Associa a Tabela de Rotas com a SubNet Privada
+  PrivadaRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivadaRouteTable
+      SubnetId: !Ref NovaSubnet2
+
+# Cria o sec Group Web
+  NovoWEBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Webservers
+      GroupDescription: Sec Group para os web Servers
+      VpcId: !Ref NovoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: SecGroup-WEB
+        # - IpProtocol: tcp
+        #   FromPort: 443
+        #   ToPort: 443
+        #   CidrIp: 0.0.0.0/0
+
+# Cria o sec Group Databases
+  NovoDBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Databases
+      GroupDescription: Sec Group para os Databases
+      VpcId: !Ref NovoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: SecGroup-DB
+
+# Cria Volume
+  DBVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    Properties: 
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 64
+      Tags: 
+        - Key: Name
+          Value: data-volume
+      VolumeType: gp2
+    
+  NovaDBInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 24
+            VolumeType: gp2
+      InstanceType: t2.nano
+      ImageId: ami-09e67e426f25ce0d7
+      KeyName: aws-class-2 
+      Monitoring: true
+      SecurityGroupIds:
+        - !Ref NovoDBSecGroup
+      SubnetId: !Ref NovaSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DB 
+      Volumes:
+        - Device: "/dev/sdf"
+          VolumeId: !Ref DBVolume
+
+  DBVolume2:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    Properties: 
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 64
+      Tags: 
+        - Key: Name
+          Value: data-volume2
+      VolumeType: gp2
+
+  NovaDBInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 24
+            VolumeType: gp2
+      InstanceType: t2.nano
+      ImageId: ami-09e67e426f25ce0d7
+      KeyName: aws-class-2 
+      Monitoring: true
+      SecurityGroupIds:
+        - !Ref NovoDBSecGroup
+      SubnetId: !Ref NovaSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DB2 
+      Volumes:
+        - Device: "/dev/sdf"
+          VolumeId: !Ref DBVolume2
+
+  NovoElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref NovaWEBInstance
+      Domain: NovoVPC
+
+  NovaWEBInstance:
+      Type: AWS::EC2::Instance
+      Properties:
+        BlockDeviceMappings:
+          - DeviceName: "/dev/sda1"
+            Ebs:
+              VolumeSize: 24
+              VolumeType: gp2
+        InstanceType: t2.nano
+        ImageId: ami-09e67e426f25ce0d7
+        KeyName: aws-class-2 
+        Monitoring: true
+        SecurityGroupIds:
+          - !Ref NovoWEBSecGroup
+        SubnetId: !Ref NovaSubnet1
+        UserData: 
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              sudo apt update -y
+              sudo apt install nginx -y 
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-WEB 
+
+  NovoElasticIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref NovaWEBInstance2
+      Domain: NovoVPC
+
+  NovaWEBInstance2:
+      Type: AWS::EC2::Instance
+      Properties:
+        BlockDeviceMappings:
+          - DeviceName: "/dev/sda1"
+            Ebs:
+              VolumeSize: 24
+              VolumeType: gp2
+        InstanceType: t2.nano
+        ImageId: ami-09e67e426f25ce0d7
+        KeyName: aws-class-2 
+        Monitoring: true
+        SecurityGroupIds:
+          - !Ref NovoWEBSecGroup
+        SubnetId: !Ref NovaSubnet1
+        UserData: 
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              sudo apt update -y
+              sudo apt install nginx -y
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-WEB2 
